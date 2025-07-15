@@ -17,7 +17,6 @@ from typing import (
     Union,
 )
 
-from instructor.multimodal import PDF, Image, Audio
 from openai.types import CompletionUsage as OpenAIUsage
 from openai.types.chat import (
     ChatCompletion,
@@ -25,10 +24,13 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
 )
 
+from instructor.multimodal import PDF, Audio, Image
+
 if TYPE_CHECKING:
     from anthropic.types import Usage as AnthropicUsage
 
 from enum import Enum
+
 from pydantic import BaseModel
 
 logger = logging.getLogger("instructor")
@@ -670,25 +672,34 @@ def transform_to_gemini_prompt(
 
 def verify_no_unions(obj: dict[str, Any]) -> bool:
     """
-    Verify that the object does not contain any Union types (except Optional).
+    Verify that the object does not contain any Union types (except Optional and Decimal).
     Optional[T] is allowed as it becomes Union[T, None].
+    Decimal types are allowed as Union[str, float] or Union[float, str].
     """
     for prop_value in obj["properties"].values():
         if "anyOf" in prop_value:
-            # Check if this is an Optional type (Union with None/null)
             any_of_list = prop_value["anyOf"]
             if not isinstance(any_of_list, list) or len(any_of_list) != 2:
                 return False
 
-            # Check if one of the types is null (representing None in Optional[T])
-            has_null = any(
-                isinstance(item, dict) and item.get("type") == "null"
-                for item in any_of_list
-            )
+            # Extract the types from the anyOf list
+            types_in_union = []
+            for item in any_of_list:
+                if isinstance(item, dict) and "type" in item:
+                    types_in_union.append(item["type"])
 
-            if not has_null:
-                # This is a true Union type, not Optional - reject it
-                return False
+            # Check if this is an Optional type (Union with None/null)
+            if "null" in types_in_union:
+                # This is Optional[T] - allow it
+                continue
+
+            # Check if this is a Decimal type (Union of string and number)
+            if set(types_in_union) == {"string", "number"}:
+                # This is a Decimal type (string | number) - allow it
+                continue
+
+            # This is some other Union type - reject it
+            return False
 
         if "properties" in prop_value and not verify_no_unions(prop_value):
             return False
@@ -777,7 +788,7 @@ def update_genai_kwargs(
     """
     Update keyword arguments for google.genai package from OpenAI format.
     """
-    from google.genai.types import HarmCategory, HarmBlockThreshold
+    from google.genai.types import HarmBlockThreshold, HarmCategory
 
     new_kwargs = kwargs.copy()
 
@@ -873,10 +884,13 @@ def update_gemini_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     # Handle safety settings - import here to avoid circular imports
     try:
-        from google.genai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+        from google.genai.types import HarmBlockThreshold, HarmCategory  # type: ignore
     except ImportError:
         # Fallback for backward compatibility
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+        from google.generativeai.types import (  # type: ignore
+            HarmBlockThreshold,
+            HarmCategory,
+        )
 
     # Create or get existing safety settings
     safety_settings = result.get("safety_settings", {})
